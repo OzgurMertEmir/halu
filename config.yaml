@@ -1,0 +1,38 @@
+seed: 2025
+deterministic: true
+
+dataset:
+  name: truthfulqa
+  size: 1000
+  seed: 2025
+
+runner:
+  store_device: cpu
+  include_embeddings: false
+  keep_logits_full: false
+
+pipeline:
+  use_icr: true
+  use_llmcheck: true
+  use_fcm: true
+
+detector:
+  hidden: 256
+  epochs: 100
+  k_folds: 5
+  n_seeds_nn: 3
+  n_seeds_tree: 3
+  seed: 2025
+
+report:
+  ece_bins: 15
+  rel_bins: 12
+  compute_bootstrap: false
+  n_boot: 1000
+  alpha: 0.05
+  abstain_targets: [0.05, 0.10, 0.20, 0.30, 0.40]
+
+paths:
+  out_dir: runs
+  report_dir: report_out
+  cache_dir: .cache

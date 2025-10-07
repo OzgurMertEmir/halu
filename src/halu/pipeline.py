@@ -1,26 +1,15 @@
-# halu/pipeline.py (only the modified parts)
+# Halu/pipeline.py (only the modified parts)
 from __future__ import annotations
 from typing import List, Dict, Set
 import numpy as np
 import torch
-from .core.types import MCQExample, ForwardPack
-from .core.runner import HFRunner
-from .core import utils
-from features.metrics.icr_probe import ICRProbeMetric
-from features.metrics.llmcheck import LLMCheckMetric
-from features.metrics.fcm import FCMMetric
-
-
-def _question_only_scaffold(tok, question: str) -> tuple[str, int]:
-    sys = "You are a helpful, factual assistant."
-    usr = f"Question: {question}\nAnswer:"
-    if hasattr(tok, "apply_chat_template"):
-        msgs = [{"role":"system","content":sys},{"role":"user","content":usr}]
-        q_prompt = tok.apply_chat_template(msgs, tokenize=False, add_generation_prompt=True)
-    else:
-        q_prompt = sys + "\n\n" + usr
-    q_len = int(tok(q_prompt, return_tensors="pt").input_ids.shape[1])
-    return q_prompt, q_len
+from halu.core.types import MCQExample, ForwardPack
+from halu.core.runner import HFRunner
+from halu.core import prompts
+from halu.core import utils
+from halu.features.metrics.icr_probe import ICRProbeMetric
+from halu.features.metrics.llmcheck import LLMCheckMetric
+from halu.features.metrics.fcm import FCMMetric
 
 class MetricsPipeline:
     def __init__(self, runner: HFRunner, *, use_icr: bool = True, use_llmcheck: bool = True, use_fcm: bool = True):
@@ -132,7 +121,7 @@ class MetricsPipeline:
         per_option_feats: List[Dict] = []
         option_labels = [o.label for o in ex.options]
         needs = self._needs_union()
-        q_prompt, q_prompt_len = _question_only_scaffold(tok, ex.question)
+        q_prompt, q_prompt_len = prompts.q_only(tok, ex.question)
 
         """for o in ex.options:
             response = f"{o.label}) {o.text}"

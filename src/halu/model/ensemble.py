@@ -1,4 +1,4 @@
-# halu/model/ensemble.py
+# Halu/model/ensemble.py
 from __future__ import annotations
 import math, numpy as np, pandas as pd, torch
 from typing import Dict
@@ -8,6 +8,7 @@ from sklearn.linear_model import LogisticRegression
 from sklearn.isotonic import IsotonicRegression
 from sklearn.impute import SimpleImputer
 from sklearn.preprocessing import StandardScaler
+from halu.analysis.eval_metrics import ece_binary, reliability_table
 
 try:
     import lightgbm as lgb
@@ -15,31 +16,6 @@ try:
 except Exception:
     _HAS_LGB = False
     from sklearn.ensemble import HistGradientBoostingClassifier
-
-# ---- core metrics ----
-def ece_binary(y_true, p, bins=15):
-    y = y_true.astype(int)
-    edges = np.linspace(0,1,bins+1)
-    inds = np.digitize(p, edges) - 1
-    ece = 0.0
-    for b in range(bins):
-        m = inds == b
-        if not m.any(): continue
-        conf = p[m].mean()
-        acc  = 1.0 - y[m].mean()
-        ece += (m.mean()) * abs(acc - (1-conf))
-    return float(ece)
-
-def reliability_table(y, p, bins=12):
-    edges = np.linspace(0, 1, bins+1)
-    idx = np.digitize(p, edges) - 1
-    rows = []
-    for b in range(bins):
-        m = (idx == b)
-        if not m.any(): continue
-        p_mean = float(np.mean(p[m])); err_rate = float(np.mean(y[m]))
-        rows.append([edges[b], edges[b+1], int(m.sum()), p_mean, err_rate, abs(p_mean - err_rate)])
-    return pd.DataFrame(rows, columns=["p_lo","p_hi","n","p_mean","err_rate","cal_error_abs"])
 
 # ---- build XY ----
 def build_xy(df: pd.DataFrame):

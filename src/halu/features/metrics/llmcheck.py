@@ -1,10 +1,11 @@
-# halu/metrics/llmcheck.py
+# Halu/metrics/llmcheck.py
 from __future__ import annotations
 from typing import Dict, Optional, Union
 import re, torch
-from core.types import ForwardPack, MCQExample
-from core import utils
-from core.utils import EPS
+from halu.core.types import ForwardPack, MCQExample
+from halu.core import utils
+from halu.core.utils import EPS
+from halu.core import utils, prompts
 
 class LLMCheckMetric:
     """
@@ -157,9 +158,9 @@ class LLMCheckMetric:
             if option_label is None:
                 m = re.match(r"\s*([A-Za-z])\s*\)", pack.response or "")
                 option_label = (m.group(1).upper() if m else (ex.gold_letter or "A"))
-            prompt_u, full_u = utils.build_prompt_noopts_letter(option_label=option_label, tokenizer=tok)
+            prompt_u, full_u, _ = prompts.uncond_letter(tok, option_label)
         else:
-            prompt_u, full_u = utils.build_uncond_noopts_with_assistant_text(assistant_text=pack.response, tokenizer=tok)
+            prompt_u, full_u, _ = prompts.uncond_assistant_text(tok, pack.response)
 
         enc_u = tok(full_u, return_tensors="pt").to(model.device)
         enc_u_prompt = tok(prompt_u, return_tensors="pt")

@@ -1,16 +1,38 @@
+# analysis/report.py
 # report.py
-# Unified reporting utilities for detector benchmarking + plots.
-
 from __future__ import annotations
-import os, json, math
+import os, json
 from dataclasses import dataclass
-from typing import Dict, Any, Iterable, Optional, Tuple, Sequence
+from typing import Dict, Any, Optional, Tuple
 
 import numpy as np
 import pandas as pd
+
+import matplotlib
+if os.environ.get("MPLBACKEND", "").lower() not in ("agg", "module://matplotlib_inline.backend_inline"):
+    try:
+        matplotlib.use("Agg", force=True)
+    except Exception:
+        pass
 import matplotlib.pyplot as plt
 
-# ===== Optional "evaluate" (HF metrics) =====
+# Small, consistent defaults
+plt.rcParams.update({
+    "figure.figsize": (6, 5),
+    "figure.dpi": 160,
+    "axes.grid": True,
+    "grid.alpha": 0.3,
+    "font.size": 11,
+})
+
+from halu.analysis.eval_metrics import (
+    ece_binary,
+    reliability_table,
+    risk_coverage_curves,
+    coverage_at_accuracy,
+    bootstrap_ci,
+)
+
 _HAS_EVALUATE = False
 try:
     import evaluate
@@ -26,6 +48,135 @@ from sklearn.metrics import (
     confusion_matrix as _sk_confusion_matrix,
     accuracy_score as _sk_accuracy,
 )
+
+
+def tau_for_abstain_frac(scores_calib: np.ndarray, abstain_frac: float) -> float:
+    s = np.asarray(scores_calib, dtype=float)
+    q = 1.0 - float(abstain_frac)
+    return float(np.quantile(s, q, method="nearest"))
+
+def _ece_binary_subset(y: np.ndarray, p: np.ndarray, bins: int = 15) -> float:
+    if len(p) == 0:
+        return float("nan")
+    edges = np.linspace(0, 1, bins + 1)
+    idx = np.digitize(p, edges) - 1
+    ece = 0.0
+    for b in range(len(edges) - 1):
+        m = (idx == b)
+        if not m.any():
+            continue
+        conf = 1.0 - float(p[m].mean())  # predicted correctness
+        acc  = 1.0 - float(y[m].mean())  # observed correctness
+        ece += (m.mean()) * abs(acc - conf)
+    return float(ece)
+
+def abstention_metrics(
+    y_true: np.ndarray,
+    p_hat: np.ndarray,
+    tau: float,
+    *,
+    bins_ece: int = 15
+) -> Dict[str, float]:
+    """
+    y_true: 1 = error/hallucination, 0 = correct
+    p_hat : predicted error probability
+    tau   : abstain if p_hat >= tau
+    """
+    y = np.asarray(y_true).astype(int)
+    p = np.asarray(p_hat, dtype=float)
+    abstain = (p >= tau)
+    keep    = ~abstain
+
+    n = float(len(y))
+    n_pos = float((y == 1).sum())
+    n_neg = float((y == 0).sum())
+
+    TP = float(((abstain) & (y == 1)).sum())
+    FP = float(((abstain) & (y == 0)).sum())
+    FN = float(((keep)    & (y == 1)).sum())
+    TN = float(((keep)    & (y == 0)).sum())
+
+    coverage         = float(keep.mean())
+    abstain_rate     = 1.0 - coverage
+
+    kept_error = float(y[keep].mean()) if keep.any() else float("nan")
+    selective_accuracy = 1.0 - kept_error if keep.any() else float("nan")
+
+    abstention_precision = TP / (TP + FP) if (TP + FP) > 0 else float("nan")
+    abstention_recall    = TP / (TP + FN) if (TP + FN) > 0 else float("nan")
+    if np.isfinite(abstention_precision) and np.isfinite(abstention_recall) and (abstention_precision + abstention_recall) > 0:
+        abstention_f1 = 2 * abstention_precision * abstention_recall / (abstention_precision + abstention_recall)
+    else:
+        abstention_f1 = float("nan")
+
+    abstention_accuracy = (TP + TN) / n if n > 0 else float("nan")
+    benign_answering_rate   = TN / n_neg if n_neg > 0 else float("nan")
+    over_conservativeness   = FP / n_neg if n_neg > 0 else float("nan")
+
+    brier_kept = float(np.mean((y[keep] - p[keep])**2)) if keep.any() else float("nan")
+    abstain_ece_kept = _ece_binary_subset(y[keep], p[keep], bins=bins_ece) if keep.any() else float("nan")
+    abstain_ece_abst = _ece_binary_subset(y[abstain], p[abstain], bins=bins_ece) if abstain.any() else float("nan")
+
+    return dict(
+        tau=float(tau),
+        coverage=coverage,
+        abstain_rate=abstain_rate,
+        selective_accuracy=selective_accuracy,
+        kept_error=kept_error,
+        abstention_accuracy=abstention_accuracy,
+        abstention_precision=abstention_precision,
+        abstention_recall=abstention_recall,
+        abstention_f1=abstention_f1,
+        benign_answering_rate=benign_answering_rate,
+        over_conservativeness=over_conservativeness,
+        brier_kept=brier_kept,
+        abstain_ece_kept=abstain_ece_kept,
+        abstain_ece_abstained=abstain_ece_abst
+    )
+
+def build_abstention_table_from_targets(
+    y_test: np.ndarray,
+    p_test_calibrated: np.ndarray,
+    p_calib_blend: np.ndarray,
+    abstain_targets = (0.05, 0.10, 0.20, 0.30, 0.40),
+    bins_ece: int = 15
+) -> pd.DataFrame:
+    rows = []
+    for a in abstain_targets:
+        tau = tau_for_abstain_frac(p_calib_blend, a)
+        m = abstention_metrics(y_test, p_test_calibrated, tau, bins_ece=bins_ece)
+        rows.append({"abstain_frac_target": float(a), **m})
+    return pd.DataFrame(rows)
+
+def export_selective_plots_and_tables(
+    y_test: np.ndarray,
+    p_test_calibrated: np.ndarray,
+    abst_table: pd.DataFrame,
+    out_dir: str = "paper_metrics",
+    acc_targets = (0.80, 0.85, 0.90, 0.95)
+) -> Dict[str, float]:
+    os.makedirs(out_dir, exist_ok=True)
+    AURC, AUACC, cov, risk, acc = None, None, None, None, None
+    cov, risk, acc, AURC, AUACC = risk_coverage_curves(y_test, p_test_calibrated)
+
+    plt.figure()
+    plt.plot(cov, risk, lw=2)
+    plt.xlabel("Coverage"); plt.ylabel("Risk (error rate among kept)")
+    plt.title("Risk–Coverage (Test, calibrated)")
+    plt.tight_layout()
+    plt.savefig(os.path.join(out_dir, "risk_coverage.png")); plt.close()
+
+    plt.figure()
+    plt.plot(cov, acc, lw=2)
+    plt.xlabel("Coverage"); plt.ylabel("Accuracy among kept)")
+    plt.title("Accuracy–Coverage (Test, calibrated)")
+    plt.tight_layout()
+    plt.savefig(os.path.join(out_dir, "accuracy_coverage.png")); plt.close()
+
+    cov_at = {f"Coverage@Acc≥{a:.2f}": coverage_at_accuracy(y_test, p_test_calibrated, a) for a in acc_targets}
+    abst_table.to_csv(os.path.join(out_dir, "abstention_table.csv"), index=False)
+    return dict(AURC=AURC, AUACC=AUACC, **cov_at)
+
 
 # ------------------------------------------------------------------------------------
 # HF "evaluate-metric" wrappers with safe fallbacks
@@ -101,51 +252,6 @@ def _confusion_matrix(y_true_bin: np.ndarray, y_pred_bin: np.ndarray) -> np.ndar
     # sklearn returns by label order; ensure labels=[0,1]
     return _sk_confusion_matrix(y, z, labels=[0, 1]).astype(float)
 
-# ------------------------------------------------------------------------------------
-# Core helpers you already rely on (custom metrics)
-# ------------------------------------------------------------------------------------
-def ece_binary(y_true: np.ndarray, p_err: np.ndarray, bins: int = 15) -> float:
-    """
-    Expected Calibration Error (ECE) for P(error). y=1 denotes error/incorrect.
-    """
-    y = np.asarray(y_true).astype(int)
-    p = np.asarray(p_err, dtype=float)
-    edges = np.linspace(0, 1, bins + 1)
-    inds = np.digitize(p, edges) - 1
-    ece = 0.0
-    for b in range(bins):
-        m = (inds == b)
-        if not m.any():
-            continue
-        conf = float(p[m].mean())
-        acc  = 1.0 - float(y[m].mean())  # accuracy in bin
-        # For Perr, "confidence" that it's correct is (1 - Perr)
-        ece += float(m.mean()) * abs((1 - conf) - acc)
-    return float(ece)
-
-def reliability_table(y_true: np.ndarray, p_err: np.ndarray, bins: int = 12) -> pd.DataFrame:
-    """
-    Reliability bins for P(error). Reports per-bin P(error) mean vs. actual error rate.
-    """
-    y = np.asarray(y_true).astype(int)
-    p = np.asarray(p_err, dtype=float)
-    edges = np.linspace(0, 1, bins + 1)
-    idx = np.digitize(p, edges) - 1
-    rows = []
-    for b in range(bins):
-        m = (idx == b)
-        if not m.any():
-            continue
-        p_mean = float(p[m].mean())
-        err_rate = float(y[m].mean())
-        rows.append([
-            float(edges[b]), float(edges[b + 1]), int(m.sum()),
-            p_mean, err_rate, abs(p_mean - err_rate)
-        ])
-    return pd.DataFrame(rows, columns=[
-        "p_lo", "p_hi", "n", "p_mean(Perr)", "err_rate", "cal_error_abs"
-    ])
-
 def tau_for_abstain_frac(scores_calib: np.ndarray, abstain_frac: float) -> float:
     """
     Given error scores s (higher = more likely error), choose τ s.t. fraction above τ ≈ abstain_frac.
@@ -176,71 +282,6 @@ def selective_metrics(y_true: np.ndarray, p_err: np.ndarray, tau: float, bins_ec
         brier_kept=brier_kept,
         ece_kept=ece_kept,
     )
-
-def risk_coverage_curves(y_true: np.ndarray, p_err: np.ndarray, n: int = 200) -> Tuple[np.ndarray, np.ndarray, np.ndarray, float, float]:
-    """
-    Build (coverage, risk, accuracy) curves by sweeping τ over quantiles of p_err.
-    Returns cov, risk, acc, AURC, AUACC.
-    """
-    y = np.asarray(y_true).astype(int)
-    p = np.asarray(p_err, dtype=float)
-    taus = np.quantile(p, np.linspace(0, 1, n))
-    cov, risk, acc = [], [], []
-    for t in taus:
-        keep = p < t
-        if not keep.any():
-            continue
-        e = float(y[keep].mean())
-        cov.append(float(keep.mean()))
-        risk.append(e)
-        acc.append(1.0 - e)
-    if not cov:
-        return np.array([]), np.array([]), np.array([]), float("nan"), float("nan")
-    cov = np.asarray(cov); risk = np.asarray(risk); acc = np.asarray(acc)
-    order = np.argsort(cov)
-    # numpy >=1.20: trapezoid
-    AURC  = float(np.trapezoid(risk[order], cov[order]))
-    AUACC = float(np.trapezoid(np.nan_to_num(acc[order]), cov[order]))
-    return cov[order], risk[order], acc[order], AURC, AUACC
-
-def coverage_at_accuracy(y_true: np.ndarray, p_err: np.ndarray, acc_target: float) -> float:
-    cov, _, acc, _, _ = risk_coverage_curves(y_true, p_err)
-    if len(cov) == 0:
-        return 0.0
-    hit = (acc >= acc_target)
-    return float(cov[hit].max()) if hit.any() else 0.0
-
-def bootstrap_ci(
-    func, y: np.ndarray, p: np.ndarray, n_boot: int = 1000, alpha: float = 0.05, seed: int = 1337
-) -> Tuple[float, float, float]:
-    """
-    Generic stratified bootstrap for scalar metric func(y, p).
-    Returns (lo, hi, point).
-    """
-    rng = np.random.default_rng(seed)
-    y = np.asarray(y).astype(int)
-    p = np.asarray(p, dtype=float)
-    point = float(func(y, p))
-    # stratified splits (0/1)
-    idx0 = np.where(y == 0)[0]
-    idx1 = np.where(y == 1)[0]
-    if len(idx0) == 0 or len(idx1) == 0:
-        return (float("nan"), float("nan"), point)
-    vals = []
-    for _ in range(n_boot):
-        s0 = rng.choice(idx0, size=len(idx0), replace=True)
-        s1 = rng.choice(idx1, size=len(idx1), replace=True)
-        s = np.concatenate([s0, s1])
-        ys = y[s]; ps = p[s]
-        try:
-            vals.append(float(func(ys, ps)))
-        except Exception:
-            continue
-    if not vals:
-        return (float("nan"), float("nan"), point)
-    lo = float(np.quantile(vals, alpha / 2.0))
-    hi = float(np.quantile(vals, 1 - alpha / 2.0))
-    return lo, hi, point
 
 # ------------------------------------------------------------------------------------
 # Vanilla baseline (confidence) from df

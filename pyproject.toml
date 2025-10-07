@@ -1,0 +1,22 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "Halu"
+version = "0.1.0"
+description = "Hallucination detector benchmarking & analysis"
+readme = "README.md"
+requires-python = ">=3.8"
+dependencies = [
+  "numpy", "pandas", "scikit-learn", "torch", "datasets", "tqdm", "matplotlib",
+  "evaluate; python_version >= '3.8'",
+  "lightgbm; platform_system != 'Darwin' or platform_machine != 'arm64'",
+]
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+include-package-data = true
+
+[tool.setuptools.packages.find]
+where = ["src"]

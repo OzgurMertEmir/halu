@@ -1,3 +1,3 @@
-from .base import Dataset
-from .truthfulqa import TruthfulQADataset
-from .open_llm import OpenLLMDataset
+from halu.data.base import Dataset
+from halu.data.truthfulqa import TruthfulQADataset
+from halu.data.open_llm import OpenLLMDataset

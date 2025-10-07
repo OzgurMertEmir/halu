@@ -2,8 +2,9 @@ from __future__ import annotations
 from typing import Dict, Any
 import numpy as np
 import torch
-from core.types import MCQExample
-from core import utils
+from halu.core.types import MCQExample
+from halu.core import utils
+from halu.core.prompts import openllm_prompt
 
 class FCMMetric:
     def __init__(self, runner, temperature: float = 1.0, n_votes: int = 16):
@@ -18,7 +19,7 @@ class FCMMetric:
         model.eval()
         options_text = utils.options_text_from_ex(ex)
         letters = utils.labels_from_ex(ex)
-        prompt = utils.build_openllm_prompt(ex.question, options_text)
+        prompt = openllm_prompt(ex.question, options_text)
         enc = tokenizer(prompt, add_special_tokens=False, return_tensors="pt").to(model.device)
         logits = model(**enc, use_cache=False, return_dict=True).logits[0, -1, :]  # [V]
 

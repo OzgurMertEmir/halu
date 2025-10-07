@@ -2,100 +2,36 @@ from __future__ import annotations
 from typing import List, Dict, Iterable, Tuple, Any
 import numpy as np
 import torch
+from . import prompts as _P
 
 EPS = 1e-10
 SEED = 1234
 NEED_LOGITS="logits"; NEED_HIDDEN="hidden_layers"; NEED_ATTN="attn_layers"
 
+def build_openllm_prompt(question: str, options_text: str) -> str:
+    return _P.openllm_prompt(question, options_text)
+
+def build_prompt(ex, tokenizer=None) -> str:
+    opts = "\n".join([f"{o.label}) {o.text}" for o in ex.options])
+    txt, _ = _P.q_with_options(tokenizer, ex.question, opts)
+    return txt
+
+def build_prompt_uncond(ex, option_label: str, tokenizer=None):
+    return _P.uncond_letter(tokenizer, option_label)  # (prompt, full, len)
+
+def build_uncond_with_assistant_text(ex, assistant_text: str, tokenizer=None):
+    return _P.uncond_assistant_text(tokenizer, assistant_text)
+
+def build_prompt_noopts_letter(option_label: str, tokenizer=None):
+    return _P.uncond_letter(tokenizer, option_label)  # (prompt, full, len)
+
+def build_uncond_noopts_with_assistant_text(assistant_text: str, tokenizer=None):
+    return _P.uncond_assistant_text(tokenizer, assistant_text)
 def options_text_from_ex(ex) -> str:
     return "\n".join([f"{o.label}) {o.text}" for o in ex.options])
 
 def labels_from_ex(ex) -> List[str]:
     return [o.label.upper() for o in ex.options]
-
-def build_prompt(ex, tokenizer=None) -> str:
-    system = "You are a helpful, factual assistant."
-    user = f"Question: {ex.question}\nOptions:\n{options_text_from_ex(ex)}\nAnswer:"
-    if tokenizer is not None and hasattr(tokenizer, "apply_chat_template"):
-        messages = [{"role":"system","content":system},{"role":"user","content":user}]
-        try:
-            return tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
-        except Exception:
-            pass
-    return system + "\n\n" + user
-
-def build_prompt_uncond(ex, option_label: str, tokenizer=None) -> Tuple[str, str]:
-    system = "You are a helpful, factual assistant."
-    user = f"Options:\n{options_text_from_ex(ex)}\nAnswer:"
-    assistant = f"{(option_label or 'A').strip().upper()})"
-    if tokenizer is not None and hasattr(tokenizer, "apply_chat_template"):
-        msgs_p = [{"role":"system","content":system},{"role":"user","content":user}]
-        msgs_f = msgs_p + [{"role":"assistant","content":assistant}]
-        try:
-            prompt = tokenizer.apply_chat_template(msgs_p, tokenize=False, add_generation_prompt=True)
-            full = tokenizer.apply_chat_template(msgs_f, tokenize=False, add_generation_prompt=False)
-            return prompt, full
-        except Exception:
-            pass
-    prompt = system + "\n\n" + user
-    full = prompt + " " + assistant
-    return prompt, full
-
-def build_uncond_with_assistant_text(ex, assistant_text: str, tokenizer=None):
-    system = "You are a helpful, factual assistant."
-    user = f"Options:\n{options_text_from_ex(ex)}\nAnswer:"
-    if tokenizer is not None and hasattr(tokenizer, "apply_chat_template"):
-        msgs_p = [{"role":"system","content":system},{"role":"user","content":user}]
-        msgs_f = msgs_p + [{"role":"assistant","content":assistant_text}]
-        try:
-            prompt = tokenizer.apply_chat_template(msgs_p, tokenize=False, add_generation_prompt=True)
-            full   = tokenizer.apply_chat_template(msgs_f, tokenize=False, add_generation_prompt=False)
-            return prompt, full
-        except Exception:
-            pass
-    prompt = system + "\n\n" + user
-    full   = prompt + " " + assistant_text
-    return prompt, full
-
-def build_prompt_noopts_letter(option_label: str, tokenizer=None):
-    """Unconditional scaffold WITHOUT the options list; assistant begins with 'B)' etc."""
-    system = "You are a helpful, factual assistant."
-    user   = "Answer:"
-    assistant = f"{(option_label or 'A').strip().upper()})"
-    if tokenizer is not None and hasattr(tokenizer, "apply_chat_template"):
-        msgs_p = [{"role":"system","content":system},{"role":"user","content":user}]
-        msgs_f = msgs_p + [{"role":"assistant","content":assistant}]
-        try:
-            prompt = tokenizer.apply_chat_template(msgs_p, tokenize=False, add_generation_prompt=True)
-            full   = tokenizer.apply_chat_template(msgs_f, tokenize=False, add_generation_prompt=False)
-            return prompt, full
-        except Exception:
-            pass
-    prompt = system + "\n\n" + user
-    full   = prompt + " " + assistant
-    return prompt, full
-
-def build_uncond_noopts_with_assistant_text(assistant_text: str, tokenizer=None):
-    """Unconditional scaffold WITHOUT the options list; assistant begins with full 'B) Mars ...'."""
-    system = "You are a helpful, factual assistant."
-    user   = "Answer:"
-    if tokenizer is not None and hasattr(tokenizer, "apply_chat_template"):
-        msgs_p = [{"role":"system","content":system},{"role":"user","content":user}]
-        msgs_f = msgs_p + [{"role":"assistant","content":assistant_text}]
-        try:
-            prompt = tokenizer.apply_chat_template(msgs_p, tokenize=False, add_generation_prompt=True)
-            full   = tokenizer.apply_chat_template(msgs_f, tokenize=False, add_generation_prompt=False)
-            return prompt, full
-        except Exception:
-            pass
-    prompt = system + "\n\n" + user
-    full   = prompt + " " + (assistant_text or "")
-    return prompt, full
-
-#def _mean_nll(logits_resp: torch.Tensor, targets_resp: torch.Tensor) -> torch.Tensor:
-#    logp = torch.log_softmax(logits_resp, dim=-1)  # [T, V]
-#    nll = -logp.gather(-1, targets_resp.view(-1,1)).squeeze(-1)  # [T]
-#    return nll.mean()
 
 def _mean_nll(logits_resp: torch.Tensor, targets_resp: torch.Tensor) -> torch.Tensor:
     """Compute mean negative log-likelihood with robust error handling."""
@@ -172,9 +108,6 @@ def pool_icr_features(
     else:
         scalars["attn_delta_consistency"] = float("nan")
     return scalars
-
-def build_openllm_prompt(question: str, options_text: str) -> str:
-    return f"Question: {question}\nOptions:\n{options_text}\nAnswer:"
 
 def _letter_buckets(tokenizer, letters: List[str]) -> Tuple[List[List[int]], List[str]]:
     buckets: List[List[int]] = []

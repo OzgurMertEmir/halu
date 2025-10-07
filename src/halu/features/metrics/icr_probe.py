@@ -1,8 +1,8 @@
 from __future__ import annotations
 from typing import Iterable, Optional, Dict
 import torch
-from core.types import ForwardPack, MCQExample
-from core.utils import _safe_cos, pool_icr_features, EPS
+from halu.core.types import ForwardPack, MCQExample
+from halu.core.utils import _safe_cos, pool_icr_features, EPS
 
 class ICRProbeMetric:
     """ICR-Probe (MCQ): track hidden-state dynamics over response tokens."""

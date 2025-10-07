@@ -1,11 +1,11 @@
-from .core.types import MCQOption, MCQExample, ForwardPack
-from .core.runner import HFRunner
-from .pipeline import MetricsPipeline
+# halu/__init__.py
+from halu.core.types import MCQOption, MCQExample, ForwardPack
+from halu.core.runner import HFRunner
+from halu.pipeline import MetricsPipeline
+from halu.engine import DetectorEnsemble, DetectorConfig
 
-from .data.table_builder import build_df
-from .model.ensemble import build_xy, cv_blend_and_calibrate, reliability_table
-from .analysis.selective_eval import (
-    tau_for_abstain_frac, aurc_and_auacc, coverage_at_accuracy, bootstrap_selective,
-    risk_coverage_curves, abstention_metrics, build_abstention_table_from_targets, 
-    export_selective_plots_and_tables
+# Light re-exports for public API
+from halu.features.build import build_features_df
+from halu.analysis.eval_metrics import (
+    ece_binary, reliability_table, aurc_and_auacc, coverage_at_accuracy, bootstrap_ci
 )
