@@ -252,14 +252,6 @@ def _confusion_matrix(y_true_bin: np.ndarray, y_pred_bin: np.ndarray) -> np.ndar
     # sklearn returns by label order; ensure labels=[0,1]
     return _sk_confusion_matrix(y, z, labels=[0, 1]).astype(float)
 
-def tau_for_abstain_frac(scores_calib: np.ndarray, abstain_frac: float) -> float:
-    """
-    Given error scores s (higher = more likely error), choose τ s.t. fraction above τ ≈ abstain_frac.
-    """
-    s = np.asarray(scores_calib, dtype=float)
-    q = 1.0 - float(abstain_frac)
-    return float(np.quantile(s, q, method="nearest"))
-
 def selective_metrics(y_true: np.ndarray, p_err: np.ndarray, tau: float, bins_ece: int = 15) -> Dict[str, float]:
     """
     Compute coverage and probability quality on the *kept* set (p_err < tau).
@@ -292,32 +284,64 @@ def vanilla_confidence_series(df: pd.DataFrame) -> np.ndarray:
     Priority: 'p_opt_chosen' (probability mass of chosen option).
     Fallback: normalized 'p_opt_gap' if present; otherwise median-filled zeros.
     """
-    c = pd.to_numeric(df.get("p_opt_chosen"), errors="coerce")
+    if "p_opt_chosen" in df.columns:
+        c = pd.to_numeric(df["p_opt_chosen"], errors="coerce")
+    else:
+        c = pd.Series(np.nan, index=df.index, dtype=float)
+
     if c.isna().all():
-        margin = pd.to_numeric(df.get("p_opt_gap"), errors="coerce")
+        if "p_opt_gap" in df.columns:
+            margin = pd.to_numeric(df["p_opt_gap"], errors="coerce")
+        else:
+            margin = pd.Series(np.nan, index=df.index, dtype=float)
+
         if margin.notna().any():
             z = (margin - margin.min()) / (margin.max() - margin.min() + 1e-12)
             c = z
         else:
-            c = pd.Series(0.0, index=df.index)
-    c = c.fillna(c.median()).clip(0, 1)
-    return c.values.astype(float)
+            c = pd.Series(0.0, index=df.index, dtype=float)
+    # robust median fill (handles all-NaN gracefully) and clamp to [0,1]
+    med = float(np.nanmedian(c.values)) if np.isnan(c.values).any() else float(c.median())
+    c = c.fillna(med).clip(0, 1)
+    return c.to_numpy(dtype=float)
 
 # ------------------------------------------------------------------------------------
 # Plotting
 # ------------------------------------------------------------------------------------
 def _save_reliability_plot(y: np.ndarray, p_err: np.ndarray, out_path: str, bins: int = 12, title: str = "Reliability (P(error))") -> None:
     tab = reliability_table(y, p_err, bins=bins)
-    # Expected correct prob per bin is (1 - p_mean(Perr)), observed is (1 - err_rate)
-    x = 0.5 * (tab["p_lo"].values + tab["p_hi"].values)
-    yhat = 1.0 - tab["p_mean(Perr)"].values
-    yobs = 1.0 - tab["err_rate"].values
+    # Be robust to slight schema variations
+
+    def pick(colnames, default=None):
+        for c in colnames:
+            if c in tab.columns:
+                return tab[c].values
+        return default
+
+    p_lo = pick(["p_lo", "bin_lo", "lo", "edge_lo"])
+    p_hi = pick(["p_hi", "bin_hi", "hi", "edge_hi"])
+    p_mean_perr = pick(["p_mean(Perr)", "prob_mean_error", "p_mean", "pred_mean"])
+    err_rate = pick(["err_rate", "error_rate", "emp_err", "acc_err"])
+    n_vals = pick(["n", "count", "size"], default=np.zeros(len(tab), dtype=float))
+    # Fallbacks if edges missing: approximate x by p_mean
+    if p_lo is not None and p_hi is not None:
+        x = 0.5 * (p_lo + p_hi)
+    else:
+        x = p_mean_perr if p_mean_perr is not None else np.linspace(0, 1, len(tab), endpoint=False) + 0.5 / len(tab)
+    # Predicted/observed correctness from P(error)
+    yhat = 1.0 - (p_mean_perr if p_mean_perr is not None else x)
+    yobs = 1.0 - (err_rate if err_rate is not None else np.zeros_like(x))
 
     plt.figure(figsize=(6, 5))
     plt.plot([0, 1], [0, 1], linestyle="--")
     plt.scatter(yhat, yobs)
-    for i, n in enumerate(tab["n"].values):
-        plt.annotate(str(int(n)), (yhat[i], yobs[i]), textcoords="offset points", xytext=(4, 4), fontsize=8)
+
+    for i, n in enumerate(n_vals):
+        try:
+            plt.annotate(str(int(n)), (yhat[i], yobs[i]), textcoords="offset points", xytext=(4, 4), fontsize=8)
+        except Exception:
+            pass
+
     plt.xlabel("Predicted correctness (1 - P(error))")
     plt.ylabel("Observed correctness")
     plt.title(title)
@@ -504,6 +528,18 @@ def generate_report(
 
     abst_csv = os.path.join(out_dir, f"{prefix}_abstention_table.csv")
     abst_table.to_csv(abst_csv, index=False)
+
+    try:
+        preds_csv = os.path.join(out_dir, f"{prefix}_predictions.csv")
+        pd.DataFrame({
+            "qid": df_te.get("qid", pd.RangeIndex(len(df_te))),
+            "gold": df_te["gold"],
+            "chosen": df_te["chosen"],
+            "p_error": p_te,
+            "is_error": y_te,
+        }).to_csv(preds_csv, index=False)
+    except Exception:
+        pass
 
     # Improvement snapshot (one-line summary)
     imp_summary = {

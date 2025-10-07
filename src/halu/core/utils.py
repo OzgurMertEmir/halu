@@ -3,6 +3,7 @@ from typing import List, Dict, Iterable, Tuple, Any
 import numpy as np
 import torch
 from . import prompts as _P
+from halu.utils.math import pearson_from_centered
 
 EPS = 1e-10
 SEED = 1234
@@ -10,7 +11,7 @@ NEED_LOGITS="logits"; NEED_HIDDEN="hidden_layers"; NEED_ATTN="attn_layers"
 
 def build_openllm_prompt(question: str, options_text: str) -> str:
     return _P.openllm_prompt(question, options_text)
-
+'''
 def build_prompt(ex, tokenizer=None) -> str:
     opts = "\n".join([f"{o.label}) {o.text}" for o in ex.options])
     txt, _ = _P.q_with_options(tokenizer, ex.question, opts)
@@ -27,6 +28,34 @@ def build_prompt_noopts_letter(option_label: str, tokenizer=None):
 
 def build_uncond_noopts_with_assistant_text(assistant_text: str, tokenizer=None):
     return _P.uncond_assistant_text(tokenizer, assistant_text)
+'''
+
+def build_prompt(ex, tokenizer=None) -> str:
+    # q_with_options returns (prompt, prompt_len) – we need just the text
+    opts = options_text_from_ex(ex)
+    prompt, _ = _P.q_with_options(tokenizer, ex.question, opts)
+    return prompt
+
+def build_prompt_uncond(ex, option_label: str, tokenizer=None) -> Tuple[str, str]:
+    # Include options in the prompt as required by tests
+    opts = options_text_from_ex(ex)
+    p, f, _ = _P.uncond_letter_with_options(tokenizer, opts, letter=option_label)
+    return p, f
+
+def build_uncond_with_assistant_text(ex, assistant_text: str, tokenizer=None) -> Tuple[str, str]:
+    # uncond_assistant_text returns (prompt, full, prompt_len) – drop length
+    p, f, _ = _P.uncond_assistant_text(tokenizer, assistant_text)
+    return p, f
+
+def build_prompt_noopts_letter(option_label: str, tokenizer=None) -> Tuple[str, str]:
+    # alias for the same uncond_letter path
+    p, f, _ = _P.uncond_letter(tokenizer, option_label)
+    return p, f
+
+def build_uncond_noopts_with_assistant_text(assistant_text: str, tokenizer=None) -> Tuple[str, str]:
+    # alias for the same uncond_assistant_text path
+    p, f, _ = _P.uncond_assistant_text(tokenizer, assistant_text)
+    return p, f
 def options_text_from_ex(ex) -> str:
     return "\n".join([f"{o.label}) {o.text}" for o in ex.options])
 
@@ -65,10 +94,6 @@ def _safe_cos(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
     den = a.norm(dim=-1).clamp_min(EPS) * b.norm(dim=-1).clamp_min(EPS)
     return num / den
 
-def _pearson_from_centered(x: np.ndarray, y: np.ndarray, EPS: float = 1e-8) -> float:
-    num = float((x * y).sum())
-    den = float(np.sqrt((x*x).sum() * (y*y).sum()) + EPS)
-    return num / den if den > EPS else float("nan")
 
 def pool_icr_features(
     *,
@@ -104,7 +129,7 @@ def pool_icr_features(
     if prompt_mass_tok is not None and prompt_mass_tok.numel() == delta_per_tok.numel():
         x = (delta_per_tok - delta_per_tok.mean()).cpu().numpy()
         y = (prompt_mass_tok - prompt_mass_tok.mean()).cpu().numpy()
-        scalars["attn_delta_consistency"] = float(_pearson_from_centered(x, y))
+        scalars["attn_delta_consistency"] = float(pearson_from_centered(x, y))
     else:
         scalars["attn_delta_consistency"] = float("nan")
     return scalars

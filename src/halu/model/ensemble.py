@@ -18,13 +18,38 @@ except Exception:
     from sklearn.ensemble import HistGradientBoostingClassifier
 
 # ---- build XY ----
-def build_xy(df: pd.DataFrame):
+'''def build_xy(df: pd.DataFrame):
     y = (df["chosen"].str.upper() != df["gold"].str.upper()).astype(int).values
     drop_cols = {"qid","dataset","gold","chosen","opt_top_letter","fcm_top_letter"}
     num_cols = [c for c in df.columns if c not in drop_cols and pd.api.types.is_numeric_dtype(df[c])]
     X = df[num_cols].copy()
     imputer = SimpleImputer(strategy="median"); scaler = StandardScaler()
     X_imp = imputer.fit_transform(X); X_std = scaler.fit_transform(X_imp)
+    meta = dict(num_cols=num_cols, imputer=imputer, scaler=scaler)
+    return X_std.astype(np.float32), y.astype(np.int64), meta'''
+
+def build_xy(df: pd.DataFrame):
+    y = (df["chosen"].str.upper() != df["gold"].str.upper()).astype(int).values
+
+    drop_cols = {"qid","dataset","gold","chosen","opt_top_letter","fcm_top_letter"}
+    # keep numeric-looking columns only, coerce others to NaN
+    num_cols = [c for c in df.columns if c not in drop_cols]
+    X = pd.DataFrame({c: pd.to_numeric(df[c], errors="coerce") for c in num_cols})
+
+    # replace ±inf with NaN so the imputer can handle them
+    X = X.replace([np.inf, -np.inf], np.nan)
+
+    # keep only columns that are numeric after coercion
+    num_cols = [c for c in X.columns if pd.api.types.is_numeric_dtype(X[c])]
+
+    X = X[num_cols].copy()
+
+    imputer = SimpleImputer(strategy="median")
+    scaler  = StandardScaler()
+
+    X_imp = imputer.fit_transform(X)
+    X_std = scaler.fit_transform(X_imp)
+
     meta = dict(num_cols=num_cols, imputer=imputer, scaler=scaler)
     return X_std.astype(np.float32), y.astype(np.int64), meta
 
@@ -138,6 +163,16 @@ class BetaCalibrator:
         X = np.c_[np.log(np.clip(p, eps, 1-eps)), np.log(np.clip(1-p, eps, 1-eps))]
         return self.lr.predict_proba(X)[:,1]
 
+
+def _calibrated_preds(cal, p: np.ndarray) -> np.ndarray:
+    if hasattr(cal, "transform"):
+        return cal.transform(p).astype(float)
+    if hasattr(cal, "predict_proba"):
+        return cal.predict_proba(p.reshape(-1, 1))[:, 1].astype(float)
+    # isotonic and friends
+    return cal.predict(p).astype(float)
+
+
 def pick_best_calibrator(y_cal, p_cal):
     cands = {
         "isotonic": IsotonicRegression(out_of_bounds="clip"),
@@ -148,8 +183,7 @@ def pick_best_calibrator(y_cal, p_cal):
     fits = {}
     for name, cal in cands.items():
         cal.fit(p_cal, y_cal)
-        p_hat = cal.transform(p_cal) if hasattr(cal, "transform") else cal.predict(p_cal)
-        if not hasattr(cal, "transform"): p_hat = cal.transform(p_cal)
+        p_hat = _calibrated_preds(cal, p_cal)
         br = brier_score_loss(y_cal, p_hat)
         fits[name] = (cal, br)
         if br < best_brier:
@@ -235,7 +269,7 @@ def cv_blend_and_calibrate(X_all, y_all, seed=1337, k_folds=5, n_seeds_nn=3, n_s
     )
 
     best_name, best_cal, fits = pick_best_calibrator(y_ca, p_ca_blend)
-    p_te_cal = best_cal.transform(p_te_blend) if hasattr(best_cal, "transform") else best_cal.transform(p_te_blend)
+    p_te_cal = _calibrated_preds(best_cal, p_te_blend)
     cal = dict(best=best_name, fits={k: f"{b:.4f}" for k,(_,b) in fits.items()},
                test={k: f"{v:.4f}" for k,v in basic_metrics(y_te, p_te_cal).items()},
                reliability=reliability_table(y_te, p_te_cal, bins=12))

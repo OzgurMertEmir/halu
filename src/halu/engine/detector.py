@@ -62,13 +62,31 @@ class DetectorEnsemble:
             return torch.device("mps")
         return torch.device("cpu")
 
-    def _build_X_like_train(self, df: pd.DataFrame) -> np.ndarray:
+    '''def _build_X_like_train(self, df: pd.DataFrame) -> np.ndarray:
         """Use saved meta to project new data into the training feature space."""
         num_cols = self.meta["num_cols"]
         X_df = pd.DataFrame({
             c: pd.to_numeric(df[c], errors="coerce") if c in df.columns else np.nan
             for c in num_cols
         })
+        X_imp = self.meta["imputer"].transform(X_df)
+        X_std = self.meta["scaler"].transform(X_imp)
+        return X_std.astype(np.float32)'''
+
+    def _build_X_like_train(self, df: pd.DataFrame) -> np.ndarray:
+        """Use saved meta to project new data into the training feature space."""
+        num_cols = self.meta["num_cols"]
+
+        # 1) take the training schema columns, coerce to numeric, fill missing columns with NaN
+        X_df = pd.DataFrame({
+            c: pd.to_numeric(df[c], errors="coerce") if c in df.columns else np.nan
+            for c in num_cols
+        })
+
+        # 2) replace ±inf with NaN so the imputer can handle them
+        X_df = X_df.replace([np.inf, -np.inf], np.nan)
+
+        # 3) impute + scale with the training-time transformers
         X_imp = self.meta["imputer"].transform(X_df)
         X_std = self.meta["scaler"].transform(X_imp)
         return X_std.astype(np.float32)
@@ -96,6 +114,25 @@ class DetectorEnsemble:
             p_tree = np.zeros(len(X), dtype=float)
 
         return p_nn.astype(float), p_tree.astype(float)
+
+    def _apply_calibrator(self, p_raw: np.ndarray) -> np.ndarray:
+        cal = self.calibrator
+        if hasattr(cal, "transform"):
+            return cal.transform(p_raw).astype(float)
+        if hasattr(cal, "predict_proba"):
+            return cal.predict_proba(p_raw.reshape(-1, 1))[:, 1].astype(float)
+        if hasattr(cal, "predict"):
+            return cal.predict(p_raw.reshape(-1, 1)).astype(float)
+        # Last resort: identity (shouldn't happen if pick_best_calibrator does its job)
+        return p_raw.astype(float)
+
+    def _calibrated_preds(self, cal, p: np.ndarray) -> np.ndarray:
+        if hasattr(cal, "transform"):
+            return cal.transform(p).astype(float)
+        if hasattr(cal, "predict_proba"):
+            return cal.predict_proba(p.reshape(-1, 1))[:, 1].astype(float)
+        # e.g. IsotonicRegression
+        return cal.predict(p).astype(float)
 
     # ----- public API -----
     def fit(self, df: pd.DataFrame, df_calib: Optional[pd.DataFrame] = None) -> Dict[str, Any]:
@@ -157,8 +194,7 @@ class DetectorEnsemble:
         # Quick snapshot metrics on df (uncalibrated & calibrated)
         p_nn_all, p_tree_all = self._predict_components(X_all)
         p_blend_all = self.w_opt * p_nn_all + (1.0 - self.w_opt) * p_tree_all
-        p_cal_all = self.calibrator.transform(p_blend_all) if hasattr(self.calibrator, "transform") else \
-                    self.calibrator.predict_proba(p_blend_all.reshape(-1, 1))[:, 1]
+        p_cal_all = self._calibrated_preds(self.calibrator, p_blend_all)
 
         self._fitted = True
         return {
@@ -176,9 +212,7 @@ class DetectorEnsemble:
         X = self._build_X_like_train(df)
         p_nn, p_tree = self._predict_components(X)
         p_blend = self.w_opt * p_nn + (1.0 - self.w_opt) * p_tree
-        if hasattr(self.calibrator, "transform"):
-            return self.calibrator.transform(p_blend).astype(float)
-        return self.calibrator.predict_proba(p_blend.reshape(-1, 1))[:, 1].astype(float)
+        return self._calibrated_preds(self.calibrator, p_blend)
 
     def save(self, out_dir: str) -> None:
         """Save model + preproc to a directory."""

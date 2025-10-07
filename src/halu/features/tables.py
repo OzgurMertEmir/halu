@@ -4,10 +4,36 @@ from typing import List
 import numpy as np, pandas as pd
 from tqdm.auto import tqdm
 from halu.data.base import LETTERS
+from halu.utils.math import top2_gap, entropy_from_prob
 
 def _letters_in_rec(rec: dict) -> List[str]:
-    present = [L for L in LETTERS if any(k.startswith(f"{L}_") for k in rec.keys())]
-    return present or ["A","B","C","D"]
+    """
+    Infer which option letters are present in this record.
+    Priority:
+      1) Any letter-prefixed metrics (A_*, B_*, ...)
+      2) Keys of fcm_letter_prob_map
+      3) Explicit fcm_prob_letters list
+    Fall back to A..D if nothing found.
+    """
+    found: List[str] = []
+    # 1) From letter-prefixed fields
+    pref = [L for L in LETTERS if any(k.startswith(f"{L}_") for k in rec.keys())]
+    found.extend(pref)
+    # 2) From map
+    fmap = rec.get("fcm_letter_prob_map")
+    if isinstance(fmap, dict):
+        found.extend([str(k).upper() for k in fmap.keys() if isinstance(k, str)])
+    # 3) From ordered list (paired with fcm_letter_probs)
+    flist = rec.get("fcm_prob_letters")
+    if isinstance(flist, (list, tuple)):
+        found.extend([str(k).upper() for k in flist])
+    # Dedup in order & keep only known letters
+    seen = set()
+    out: List[str] = []
+    for L in found:
+        if L in LETTERS and L not in seen:
+            seen.add(L); out.append(L)
+    return out or ["A","B","C","D"]
 
 def _safe_float(x, default=np.nan):
     try:
@@ -22,29 +48,68 @@ def build_option_table(recs: List[dict]) -> pd.DataFrame:
         vanilla = str(r.get("model_pred") or r.get("pred_letter") or "").strip().upper()
         gold = str(r.get("gold_letter","")).strip().upper()
         letters = _letters_in_rec(r)
-        probs = r.get("fcm_letter_probs", None)
+        fcm_probs = r.get("fcm_letter_probs", None)
 
         for i, L in enumerate(letters):
-            def g(suffix, default=np.nan):
-                return _safe_float(r.get(f"{L}_{suffix}"), default)
+            def g_alias(name: str, default=np.nan):
+                alias_map = {
+                    "pmil": ["llmc_letter_ce_logpmi", "pmil"],
+                    "pmic": ["llmc_content_ce_logpmi", "pmic"],
+                    "e_letter": ["llmc_letter_logit_entropy_mean", "e_letter"],
+                    "e_content": ["llmc_content_logit_entropy_mean", "e_content"],
+                    "icrp_reliable": ["icrp_reliable"],
+                    "icrp_prompt_mass_mean": ["icrp_prompt_mass_mean", "icrp_pmass"],
+                    "icrp_pool_attn_cons": ["icrp_pool_attn_cons", "icrp_attn"],
+                    "icrp_time_delta_mean": ["icrp_time_delta_mean"],
+                    "icrp_layer_delta_mean": ["icrp_layer_delta_mean"],
+                    "icrp_interlayer_cos_mean": ["icrp_interlayer_cos_mean"],
+                    "icrp_temporal_cos_mean": ["icrp_temporal_cos_mean"],
+                    "icrp_resp_len": ["icrp_resp_len"],
+                }
+                for suf in alias_map.get(name, [name]):
+                    key = f"{L}_{suf}"
+                    if key in r and r[key] is not None:
+                        return _safe_float(r[key], default)
+                return default
+
+            # FCM sources (all optional):
+            fcm_map = r.get("fcm_letter_prob_map")  # {'A':0.1, 'B':...}
+            fcm_letters = r.get("fcm_prob_letters")  # ['B','C','A',...], aligned with fcm_probs
+
+            def _fcm_for(L, i):
+                if isinstance(fcm_map, dict) and L in fcm_map:
+                    return _safe_float(fcm_map[L])
+                if isinstance(fcm_probs, (list, tuple)):
+                    if isinstance(fcm_letters, (list, tuple)) and len(fcm_letters) == len(fcm_probs):
+                        try:
+                            j = [s.upper() for s in fcm_letters].index(L)
+                            return _safe_float(fcm_probs[j])
+                        except ValueError:
+                            return np.nan
+                    if i < len(fcm_probs):
+                        return _safe_float(fcm_probs[i])
+                return np.nan
+
+            fcm_prob = _fcm_for(L, i)
+
             rows.append(dict(
                 qid=qid, dataset=dataset, letter=L, gold=gold, vanilla=vanilla,
-                pmil=g("llmc_letter_ce_logpmi"),
-                pmic=g("llmc_content_ce_logpmi"),
-                e_letter=g("llmc_letter_logit_entropy_mean"),
-                e_content=g("llmc_content_logit_entropy_mean"),
-                icrp_reliable=g("icrp_reliable"),
-                icrp_rel=g("icrp_reliable"),
-                icrp_prompt_mass_mean=g("icrp_prompt_mass_mean"),
-                icrp_pool_attn_cons=g("icrp_pool_attn_cons"),
-                icrp_time_delta_mean=g("icrp_time_delta_mean"),
-                icrp_layer_delta_mean=g("icrp_layer_delta_mean"),
-                icrp_interlayer_cos_mean=g("icrp_interlayer_cos_mean"),
-                icrp_temporal_cos_mean=g("icrp_temporal_cos_mean"),
-                icrp_resp_len=g("icrp_resp_len"),
-                icrp_pmass=g("icrp_prompt_mass_mean"),
-                icrp_attn=g("icrp_pool_attn_cons"),
-                fcm_prob=_safe_float(probs[i]) if isinstance(probs, list) and i < len(probs) else np.nan,
+                pmil=g_alias("pmil"),
+                pmic = g_alias("pmic"),
+                e_letter = g_alias("e_letter"),
+                e_content = g_alias("e_content"),
+                icrp_reliable = g_alias("icrp_reliable"),
+                icrp_rel = g_alias("icrp_reliable"),
+                icrp_prompt_mass_mean = g_alias("icrp_prompt_mass_mean"),
+                icrp_pool_attn_cons = g_alias("icrp_pool_attn_cons"),
+                icrp_time_delta_mean = g_alias("icrp_time_delta_mean"),
+                icrp_layer_delta_mean = g_alias("icrp_layer_delta_mean"),
+                icrp_interlayer_cos_mean = g_alias("icrp_interlayer_cos_mean"),
+                icrp_temporal_cos_mean = g_alias("icrp_temporal_cos_mean"),
+                icrp_resp_len = g_alias("icrp_resp_len"),
+                icrp_pmass = g_alias("icrp_prompt_mass_mean"),
+                icrp_attn = g_alias("icrp_pool_attn_cons"),
+                fcm_prob=fcm_prob,
             ))
     OPT = pd.DataFrame(rows)
     if OPT.empty:
@@ -57,17 +122,14 @@ def build_option_table(recs: List[dict]) -> pd.DataFrame:
     OPT["y_opt"] = (OPT["letter"].str.upper() == OPT["gold"].str.upper()).astype(int)
     return OPT
 
-def _entropy(p):
-    p = np.asarray(p, dtype=float); s = p.sum()
-    if s <= 0: return float("nan")
-    p = np.clip(p / s, 1e-12, 1.0)
-    return float(-(p * np.log(p)).sum())
-
 def _gini(p):
-    p = np.asarray(p, dtype=float); s = p.sum()
-    if s <= 0: return float("nan")
-    p = np.sort(p / s); n = len(p)
-    return float((n + 1 - 2 * (np.arange(1, n+1) * p).sum()) / n)
+    p = np.asarray(p, dtype=float)
+    s = p.sum()
+    if s <= 0:
+        return float("nan")
+    p = np.sort(p / s)
+    n = len(p)
+    return float((2.0 * (np.arange(1, n + 1) * p).sum() - (n + 1)) / n)
 
 def _mk_popt_for_group(g: pd.DataFrame) -> pd.Series:
     f = pd.to_numeric(g.get("fcm_prob"), errors="coerce")
@@ -89,6 +151,17 @@ def collapse_option_side_features(OPT_with_p: pd.DataFrame) -> pd.DataFrame:
         for _, g in df.groupby("qid"):
             df.loc[g.index, "p_opt"] = _mk_popt_for_group(g)
 
+    def _renorm_group(s: pd.Series) -> pd.Series:
+        s = pd.to_numeric(s, errors="coerce").astype(float)
+        s = s.where(np.isfinite(s), 0.0)
+        tot = float(s.sum())
+        if tot > 0:
+            return s / tot
+        # all zero/NaN → flag unusable distribution
+        return pd.Series(np.nan, index=s.index, dtype=float)
+
+    df["p_opt"] = df.groupby("qid", group_keys=False)["p_opt"].apply(_renorm_group)
+
     outs = []
     for qid, grp0 in tqdm(df.groupby("qid"), desc="collapse per-question"):
         grp = grp0.copy()
@@ -101,7 +174,7 @@ def collapse_option_side_features(OPT_with_p: pd.DataFrame) -> pd.DataFrame:
         p_top = float(p_vec[0]) if len(p_vec) else np.nan
         p_second = float(p_vec[1]) if len(p_vec) > 1 else np.nan
         p_gap = p_top - p_second if np.isfinite(p_top) and np.isfinite(p_second) else np.nan
-        p_entropy = _entropy(p_vec); p_gini = _gini(p_vec)
+        p_entropy = entropy_from_prob(p_vec); p_gini = _gini(p_vec)
         p_chosen = float(chose["p_opt"].iloc[0]) if not chose.empty else np.nan
         ranks = grp["p_opt"].rank(ascending=False, method="min")
         chosen_rank = float(ranks.loc[chose.index].iloc[0]) if not chose.empty else np.nan
@@ -114,12 +187,6 @@ def collapse_option_side_features(OPT_with_p: pd.DataFrame) -> pd.DataFrame:
                 if alt in grp: return pd.to_numeric(grp[alt], errors="coerce").astype(float)
             return pd.Series(np.nan, index=grp.index, dtype=float)
 
-        def top_gap(vals: np.ndarray):
-            vals = np.asarray(vals, dtype=float); vals = vals[np.isfinite(vals)]
-            if vals.size == 0: return float("nan")
-            vals = np.sort(vals)[::-1]
-            return float(vals[0] - vals[1]) if vals.size >= 2 else float(vals[0])
-
         def chosen_val(series: pd.Series):
             if chose.empty: return np.nan
             s = pd.to_numeric(series.loc[chose.index], errors="coerce"); s = s[np.isfinite(s)]
@@ -131,10 +198,10 @@ def collapse_option_side_features(OPT_with_p: pd.DataFrame) -> pd.DataFrame:
             return float(s.max()) if len(s) else np.nan
 
         pmic = _col("pmic"); pmil = _col("pmil")
-        pmic_gap = top_gap(pmic.values); pmil_gap = top_gap(pmil.values)
+        pmic_gap = top2_gap(pmic.values); pmil_gap = top2_gap(pmil.values)
 
         fcm = _col("fcm_prob").values
-        fcm_entropy = _entropy(fcm) if np.isfinite(fcm).any() else np.nan
+        fcm_entropy = entropy_from_prob(fcm) if np.isfinite(fcm).any() else np.nan
         fcm_gini    = _gini(fcm) if np.isfinite(fcm).any() else np.nan
         letters_cov = float((fcm > 0.05).sum()) if np.isfinite(fcm).any() else np.nan
         if np.isfinite(fcm).any():
@@ -163,12 +230,4 @@ def collapse_option_side_features(OPT_with_p: pd.DataFrame) -> pd.DataFrame:
             fcm_top_letter=fcm_top_letter,
         ))
     OUT = pd.DataFrame(outs)
-
-    share_vanilla_eq_fcm_top = float((OUT["chosen"].astype(str).str.upper() ==
-                                      OUT["fcm_top_letter"].astype(str).str.upper()).mean())
-    share_rank1_by_popt = float((OUT["p_opt_rank_chosen"] == 1).mean())
-    print("Coupling report:", {
-        "share_vanilla_eq_fcm_top": share_vanilla_eq_fcm_top,
-        "share_rank1_by_popt": share_rank1_by_popt
-    })
     return OUT

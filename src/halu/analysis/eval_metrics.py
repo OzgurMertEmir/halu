@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Tuple, Callable
 import numpy as np
 import pandas as pd
+from halu.utils.math import trapz_area
 
 # ---------------------------
 # Calibration-style summaries
@@ -66,58 +67,53 @@ def reliability_table(y_true: np.ndarray, p_err: np.ndarray, bins: int = 12) -> 
 def risk_coverage_curves(
     y_true: np.ndarray,
     p_err: np.ndarray,
-    n: int = 200  # kept for API compatibility; not used in the sorted variant
+    n: int = 0  # kept for API compat; ignored in prefix mode
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, float, float]:
     """
-    Build (coverage, risk, accuracy) by sorting examples by risk (P(error)) ascending
-    and taking cumulative means. This is numerically stable and strictly monotone in coverage.
-
-    Returns (cov, risk, acc, AURC, AUACC), where:
-      - cov[k]  = (k+1)/N
-      - risk[k] = mean(y[:k+1]) after sorting by p_err ascending
-      - acc[k]  = 1 - risk[k]
-      - AURC  = ∫ risk(cov) d(cov)  (lower is better)
-      - AUACC = ∫ acc(cov)  d(cov)  (higher is better)
+    Prefix (sorted) risk-coverage curves:
+    - cov[k]  = (k+1)/N
+    - risk[k] = mean(y[:k+1]) after sorting by p_err ascending
+    - acc[k]  = 1 - risk[k]
+    Integration uses endpoints [(0,·), (cov,·)] so degenerate cases are exact.
     """
     y = np.asarray(y_true).astype(int)
     p = np.asarray(p_err, dtype=float)
     if y.shape[0] != p.shape[0]:
-        raise ValueError(f"risk_coverage_curves: y and p must have same length (got {y.shape[0]} vs {p.shape[0]})")
+        raise ValueError("risk_coverage_curves: y and p must have same length")
     N = y.shape[0]
     if N == 0:
         return np.array([]), np.array([]), np.array([]), float("nan"), float("nan")
 
-    order = np.argsort(p, kind="mergesort")  # stable for ties
+    order = np.argsort(p, kind="mergesort")
     y_sorted = y[order]
+
     cov = np.arange(1, N + 1, dtype=float) / float(N)
-    cumsum = np.cumsum(y_sorted, dtype=float)
-    risk = cumsum / np.arange(1, N + 1, dtype=float)
-    acc = 1.0 - risk
+    csum = np.cumsum(y_sorted, dtype=float)
+    risk = csum / np.arange(1, N + 1, dtype=float)
+    acc  = 1.0 - risk
 
-    # Areas under the curves
-    AURC  = float(np.trapezoid(risk, cov))
-    AUACC = float(np.trapezoid(acc,  cov))
-    return cov, risk, acc, AURC, AUACC
+    # Integrate with (0,0) for risk and (0,1) for accuracy to make edge cases exact
+    cov_i   = np.concatenate((np.array([0.0], dtype=float), cov))
+    risk_i  = np.concatenate((np.array([0.0], dtype=float), risk))
+    acc_i   = np.concatenate((np.array([1.0], dtype=float), acc))
 
+    AURC  = trapz_area(risk_i, cov_i)
+    AUACC = trapz_area(acc_i,  cov_i)
+    return cov, risk, acc, float(AURC), float(AUACC)
 
 def aurc_and_auacc(y_true: np.ndarray, p_err: np.ndarray) -> Tuple[float, float, np.ndarray, np.ndarray, np.ndarray]:
-    """
-    Convenience wrapper returning (AURC, AUACC, cov, risk, acc).
-    """
     cov, risk, acc, AURC, AUACC = risk_coverage_curves(y_true, p_err)
     return AURC, AUACC, cov, risk, acc
 
-
 def coverage_at_accuracy(y_true: np.ndarray, p_err: np.ndarray, acc_target: float) -> float:
     """
-    Max coverage achievable while keeping accuracy among kept ≥ acc_target.
+    Max coverage with accuracy >= acc_target (using the same prefix curve).
     """
     cov, _, acc, _, _ = risk_coverage_curves(y_true, p_err)
     if cov.size == 0:
         return 0.0
-    ok = (acc >= float(acc_target))
-    return float(cov[ok].max()) if ok.any() else 0.0
-
+    hit = (acc >= float(acc_target))
+    return float(cov[hit].max()) if hit.any() else 0.0
 
 # ------------------------------
 # Generic stratified bootstrap CI
@@ -162,21 +158,23 @@ def bootstrap_ci(
             continue
 
     if not vals:
-        return (float("nan"), float("nan"), point)
+        return float("nan"), float("nan"), point
 
     lo = float(np.quantile(vals, alpha / 2.0))
     hi = float(np.quantile(vals, 1 - alpha / 2.0))
     return lo, hi, point
 
 '''
-Step 1 — Unify metrics utilities (delete duplicates)
-Step 2 — Canonical column names (single schema)
-Step 3 — Slim dataset adapters
-Step 4 — Clean import paths & package boundaries
-Step 5 — Detector API (fit/predict/save/load) in one class
-Step 6 — One orchestration entry point
-Step 7 — Prompt scaffolds in one place
-Step 8 — Reports & plots (single module + consistent backend)
-Step 9 — Determinism & config
-Step 10 — Tests & examples (small but valuable)
+Phase 0 — Test harness (once)
+Step 1 — Math & metrics (pure, no torch/HF)
+Step 2 — Core utils (mathy helpers)
+Step 3 — Runner & types (no HF yet)
+Step 4 — Feature metrics (unit, with ToyModel)
+Step 5 — Tables (schema & aggregation)
+Step 6 — Data adapters (no internet by default)
+Step 7 — Model/ensemble (training/calibration, CPU)
+Step 8 — Engine (Detector API lifecycle)
+Step 9 — Reporting (plots/tables)
+Step 10 — Pipeline (metrics pipeline over an example)
+Step 11 — Orchestration (end-to-end)
 '''

@@ -2,13 +2,12 @@ from __future__ import annotations
 from dataclasses import dataclass, asdict
 from typing import Optional, Dict, Any
 from pathlib import Path
-import json, re
-import torch
+import os, json, re, torch
 from transformers import AutoTokenizer, AutoModelForCausalLM
+from halu.core.determinism import set_seed_and_register
 from halu.features.build import build_features_df
 from halu.engine import DetectorEnsemble, DetectorConfig
 from halu.analysis.report import ReportInputs, generate_report
-
 
 # ---------------- Config ----------------
 @dataclass
@@ -42,6 +41,12 @@ class RunConfig:
 
 
 # ---------------- Utilities ----------------
+def _pin_blas_threads():
+    # Optional: helps bit-for-bit repeatability on some boxes
+    os.environ.setdefault("OMP_NUM_THREADS", "1")
+    os.environ.setdefault("MKL_NUM_THREADS", "1")
+    os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
+
 def _pick_device(name: Optional[str]) -> torch.device:
     if name:
         return torch.device(name)
@@ -76,6 +81,10 @@ def _slug(s: str) -> str:
 
 # ---------------- Orchestration ----------------
 def run_all(cfg: RunConfig) -> Dict[str, Any]:
+    # 0) Determinism FIRST (before model/dataset/etc.)
+    _pin_blas_threads()
+    set_seed_and_register(cfg.seed, deterministic=True)
+
     # Prepare output folder
     tag = f"{_slug(cfg.dataset)}__{_slug(cfg.model_id.split('/')[-1])}"
     out = Path(cfg.out_dir) / tag
@@ -84,10 +93,19 @@ def run_all(cfg: RunConfig) -> Dict[str, Any]:
     # 1) Load HF model + tokenizer
     device = _pick_device(cfg.device)
     dtype  = _pick_dtype(cfg.dtype)
-    tok = AutoTokenizer.from_pretrained(cfg.model_id)
+
+    tok = AutoTokenizer.from_pretrained(cfg.model_id, use_fast=True, trust_remote_code=True)
     if tok.pad_token_id is None:
         tok.pad_token_id = tok.eos_token_id
-    model = AutoModelForCausalLM.from_pretrained(cfg.model_id, torch_dtype=dtype)
+    # Keep encoding stable across runs
+    tok.padding_side = "right"
+    tok.truncation_side = "right"
+
+    model = AutoModelForCausalLM.from_pretrained(cfg.model_id,
+                                                 torch_dtype=dtype,
+                                                 device_map="auto",
+                                                 trust_remote_code=True,
+                                                 attn_implementation="eager")
     model.to(device).eval()
 
     # 2) Build features in one pass (deterministic)
