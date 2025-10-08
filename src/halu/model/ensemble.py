@@ -44,6 +44,8 @@ def build_xy(df: pd.DataFrame):
 
     X = X[num_cols].copy()
 
+    print("Columns of X:", X.columns)
+
     imputer = SimpleImputer(strategy="median")
     scaler  = StandardScaler()
 

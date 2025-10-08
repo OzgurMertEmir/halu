@@ -110,14 +110,14 @@ def run_all(cfg: RunConfig) -> Dict[str, Any]:
     df_all = build_features_df(model, tok, cfg.dataset, size=cfg.n_examples, seed=cfg.seed)
     df_all.to_csv(out / "features.csv", index=False)
 
+    print("All columns of the built DF:\n", df_all.columns)
+
     # 2.1) Split into TRAIN / TEST for unbiased reporting
     y_all = (df_all["chosen"].astype(str).str.upper() != df_all["gold"].astype(str).str.upper()).astype(int).values
     strat = y_all if np.unique(y_all).size >= 2 else None
     df_train, df_test = train_test_split(
         df_all, test_size=cfg.test_size, random_state=cfg.seed, stratify=strat
     )
-    df_train.to_csv(out / "features_train.csv", index=False)
-    df_test.to_csv(out / "features_test.csv", index=False)
 
     # 3) Train detector (blend + calibrate) on TRAIN only
     det_cfg = DetectorConfig(

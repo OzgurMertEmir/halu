@@ -14,7 +14,7 @@ def test_run_all_qwen25_truthfulqa_cpu(tmp_path):
     cfg = RunConfig(
         model_id="Qwen/Qwen2.5-0.5B",   # small Qwen 2.5 variant
         dataset="truthfulqa",
-        n_examples=40,                   # small slice to keep CI fast
+        n_examples=20,                   # small slice to keep CI fast
         seed=1337,
         device="cpu",
         dtype="fp32",

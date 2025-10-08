@@ -163,18 +163,3 @@ def bootstrap_ci(
     lo = float(np.quantile(vals, alpha / 2.0))
     hi = float(np.quantile(vals, 1 - alpha / 2.0))
     return lo, hi, point
-
-'''
-Phase 0 — Test harness (once)
-Step 1 — Math & metrics (pure, no torch/HF)
-Step 2 — Core utils (mathy helpers)
-Step 3 — Runner & types (no HF yet)
-Step 4 — Feature metrics (unit, with ToyModel)
-Step 5 — Tables (schema & aggregation)
-Step 6 — Data adapters (no internet by default)
-Step 7 — Model/ensemble (training/calibration, CPU)
-Step 8 — Engine (Detector API lifecycle)
-Step 9 — Reporting (plots/tables)
-Step 10 — Pipeline (metrics pipeline over an example)
-Step 11 — Orchestration (end-to-end)
-'''
