@@ -55,7 +55,7 @@ def build_option_table(recs: List[dict]) -> pd.DataFrame:
                 alias_map = {
                     "pmil": ["llmc_letter_ce_logpmi", "pmil"],
                     "pmic": ["llmc_content_ce_logpmi", "pmic"],
-                    "e_letter": ["llmc_letter_logit_entropy_mean", "e_letter"],
+                    "e_letter": ["llmc_letter_ce_cond", "llmc_letter_logit_entropy_mean", "e_letter"],
                     "e_content": ["llmc_content_logit_entropy_mean", "e_content"],
                     "icrp_reliable": ["icrp_reliable"],
                     "icrp_prompt_mass_mean": ["icrp_prompt_mass_mean", "icrp_pmass"],

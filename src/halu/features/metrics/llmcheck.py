@@ -1,9 +1,8 @@
-# Halu/metrics/llmcheck.py
+# src/halu/features/metrics/llmcheck.py
 from __future__ import annotations
 from typing import Dict, Optional, Union
 import re, torch
 from halu.core.types import ForwardPack, MCQExample
-from halu.core import utils
 from halu.core.utils import EPS
 from halu.core import utils, prompts
 
@@ -42,15 +41,22 @@ class LLMCheckMetric:
         # Prefix names so you can run both views (letter/content) side-by-side
         self.prefix = f"llmc_{self.target}_"
 
-    def _content_offset_tokens(self, tok, response: str, label: str | None) -> int:
-        """How many tokens the 'B) ' prefix consumes in the response."""
+    def _content_offset_tokens(self, tok, response: str, label: Optional[str]) -> int:
+        """
+        Return the token count of the letter prefix (e.g., 'A) ') in `response`.
+        Uses add_special_tokens=False to measure raw text length.
+        """
         if label:
+            # Normalize and build explicit prefix like "A) "
             prefix = f"{label.strip().upper()}) "
-            ids = tok(prefix, add_special_tokens=False, return_tensors="pt").input_ids[0]
-            return int(len(ids))
-        m = re.match(r"\s*[A-Za-z]\s*\)\s*", response or "")
-        prefix = m.group(0) if m else ""
-        return int(len(tok(prefix, add_special_tokens=False, return_tensors="pt").input_ids[0]))
+        else:
+            # Fallback: parse from the response text
+            m = re.match(r"\s*([A-Za-z])\s*\)\s*", response or "")
+            prefix = m.group(0) if m else ""
+        ids = tok(prefix, add_special_tokens=False, return_tensors="pt").input_ids
+        if ids.ndim == 2:
+            return int(ids.shape[1])
+        return int(ids.shape[0])
 
     @torch.no_grad()
     def compute(self, pack: ForwardPack, ex: MCQExample, option_label: Optional[str] = None,
@@ -98,7 +104,7 @@ class LLMCheckMetric:
             if cached_q_prompt is not None and cached_q_prompt_len is not None:
                 # Fast path: reuse cached question-only prompt
                 text_cond = cached_q_prompt + pack.response
-                enc_c = tok(text_cond, return_tensors="pt").to(model.device)
+                enc_c = tok(text_cond, return_tensors="pt", add_special_tokens=False).to(model.device)
                 prompt_len_c = int(cached_q_prompt_len)
             else:
                 # Fallback (current behavior)
@@ -106,17 +112,16 @@ class LLMCheckMetric:
                 user_body  = f"Question: {ex.question}\nAnswer:"
                 if hasattr(tok, "apply_chat_template"):
                     msgs = [{"role":"system","content":system_txt},{"role":"user","content":user_body}]
-                    text_cond = tok.apply_chat_template(msgs, tokenize=False, add_generation_prompt=True) + pack.response
-                    prompt_len_c = int(tok(tok.apply_chat_template(
-                        [{"role":"system","content":system_txt},{"role":"user","content":user_body}],
-                        tokenize=False, add_generation_prompt=True
-                    ), return_tensors="pt").input_ids.shape[1])
+                    base = tok.apply_chat_template(msgs, tokenize=False, add_generation_prompt=True)
+                    text_cond = base + pack.response
+                    prompt_len_c = int(tok(base, return_tensors="pt", add_special_tokens=False).input_ids.shape[1])
                 else:
-                    text_cond = system_txt + "\n\n" + user_body + " " + pack.response
-                    prompt_len_c = int(tok(system_txt + "\n\n" + user_body, return_tensors="pt").input_ids.shape[1])
+                    base = system_txt + "\n\n" + user_body
+                    text_cond = base + " " + pack.response
+                    prompt_len_c = int(tok(base, return_tensors="pt", add_special_tokens=False).input_ids.shape[1])
 
-                enc_c = tok(text_cond, return_tensors="pt").to(model.device)
-
+                enc_c = tok(text_cond, return_tensors="pt", add_special_tokens=False).to(
+                        model.device)
             # Re-run a tiny forward to get logits on the aligned text
             out_c = model(**enc_c, use_cache=False, return_dict=True)
             logits_c_full = out_c.logits[0]  # [T,V]
@@ -128,7 +133,7 @@ class LLMCheckMetric:
         else:
             # letter uses existing pack (original prompt+options)
             text_cond = pack.prompt + pack.response
-            enc_c = tok(text_cond, return_tensors="pt").to(model.device)
+            enc_c = tok(text_cond, return_tensors="pt", add_special_tokens=False).to(model.device)
             logits_c = pack.logits_resp[t0:t0+span_len].to(torch.float32)
             start_abs = prompt_len + t0
             end_abs   = min(start_abs + span_len, enc_c.input_ids.shape[1])
@@ -162,8 +167,8 @@ class LLMCheckMetric:
         else:
             prompt_u, full_u, _ = prompts.uncond_assistant_text(tok, pack.response)
 
-        enc_u = tok(full_u, return_tensors="pt").to(model.device)
-        enc_u_prompt = tok(prompt_u, return_tensors="pt")
+        enc_u = tok(full_u, return_tensors="pt", add_special_tokens=False).to(model.device)
+        enc_u_prompt = tok(prompt_u, return_tensors="pt", add_special_tokens=False)
         pref_len_u = int(enc_u_prompt.input_ids.shape[1])
 
         # map the same t0/span_len
@@ -188,13 +193,40 @@ class LLMCheckMetric:
         # Use CE and PMI (no raw PPLs — they explode numerically)
         pmi = float((ce_uncond - ce_cond).item()) if (uncond_ok and cond_ok) else float("nan")
 
-        return {
+        out = {
             f"{self.prefix}ce_cond": float(ce_cond.item()) if cond_ok else float("nan"),
             f"{self.prefix}ce_uncond": float(ce_uncond.item()) if uncond_ok else float("nan"),
-            f"{self.prefix}ce_logpmi": pmi,  # PMI in nats (log-perplexity ratio)
+            f"{self.prefix}ce_logpmi": pmi,
             f"{self.prefix}logit_entropy_mean": logit_entropy_mean,
             f"{self.prefix}span_len": int(span_len),
             "llmc_prompt_len": int(prompt_len),
             "llmc_total_len": int(pack.total_len),
             "llmc_resp_len": int(resp_T),
         }
+        # Backward-compat aliases expected by tables/aggregation (if any)
+        if self.target == "content":
+            out.update({
+                "e_content_ce_logpmi": out[f"{self.prefix}ce_logpmi"],
+                "e_content_ce_cond": out[f"{self.prefix}ce_cond"],
+                "e_content_ce_uncond": out[f"{self.prefix}ce_uncond"],
+            })
+        else:
+            out.update({
+                "e_letter_ce_logpmi": out[f"{self.prefix}ce_logpmi"],
+                "e_letter_ce_cond": out[f"{self.prefix}ce_cond"],
+                "e_letter_ce_uncond": out[f"{self.prefix}ce_uncond"],
+            })
+        return out
+
+        '''
+                return {
+                    f"{self.prefix}ce_cond": float(ce_cond.item()) if cond_ok else float("nan"),
+                    f"{self.prefix}ce_uncond": float(ce_uncond.item()) if uncond_ok else float("nan"),
+                    f"{self.prefix}ce_logpmi": pmi,  # PMI in nats (log-perplexity ratio)
+                    f"{self.prefix}logit_entropy_mean": logit_entropy_mean,
+                    f"{self.prefix}span_len": int(span_len),
+                    "llmc_prompt_len": int(prompt_len),
+                    "llmc_total_len": int(pack.total_len),
+                    "llmc_resp_len": int(resp_T),
+                }
+        '''

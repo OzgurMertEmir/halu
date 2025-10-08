@@ -1,5 +1,6 @@
+# src/halu/core/utils.py
 from __future__ import annotations
-from typing import List, Dict, Iterable, Tuple, Any
+from typing import List, Dict, Tuple, Any
 import numpy as np
 import torch
 from . import prompts as _P
@@ -134,20 +135,22 @@ def pool_icr_features(
         scalars["attn_delta_consistency"] = float("nan")
     return scalars
 
+
 def _letter_buckets(tokenizer, letters: List[str]) -> Tuple[List[List[int]], List[str]]:
-    buckets: List[List[int]] = []
-    reps: List[str] = []
+    buckets, reps = [], []
     for L in letters:
-        variants = [L, f" {L}", f"{L})", f" {L})", f"{L}) "]
-        ids: List[int] = []
+        variants = [
+            L, f" {L}", f"{L})", f" {L})", f"{L}) ", f"{L}.", f" {L}.", f"{L}:", f" {L}:"
+        ]
+        ids_first = []
         for v in variants:
-            toks = tokenizer(v, add_special_tokens=False).input_ids
-            if isinstance(toks[0], list):
-                toks = toks[0]
-            if len(toks) >= 1:
-                ids.append(toks[0])
-        ids = sorted(set(ids))
-        buckets.append(ids)
+            ids = tokenizer(v, add_special_tokens=False).input_ids
+            if isinstance(ids[0], list):
+                ids = ids[0]
+            if len(ids) >= 1:
+                ids_first.append(ids[0])   # next-token mass lives on the first id
+        ids_first = sorted(set(ids_first))
+        buckets.append(ids_first)
         reps.append(L)
     return buckets, reps
 

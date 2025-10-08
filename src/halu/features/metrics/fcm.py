@@ -1,10 +1,11 @@
+# src/halu/features/metrics/fcm.py
 from __future__ import annotations
 from typing import Dict, Any
 import numpy as np
 import torch
 from halu.core.types import MCQExample
 from halu.core import utils
-from halu.core.prompts import openllm_prompt
+from halu.core import prompts
 
 class FCMMetric:
     def __init__(self, runner, temperature: float = 1.0, n_votes: int = 16):
@@ -19,11 +20,14 @@ class FCMMetric:
         model.eval()
         options_text = utils.options_text_from_ex(ex)
         letters = utils.labels_from_ex(ex)
-        prompt = openllm_prompt(ex.question, options_text)
+        prompt, _ = prompts.q_with_options(tokenizer, ex.question, options_text)
         enc = tokenizer(prompt, add_special_tokens=False, return_tensors="pt").to(model.device)
         logits = model(**enc, use_cache=False, return_dict=True).logits[0, -1, :]  # [V]
 
         p_letters, mass_on_letters, buckets = utils._letter_dist_fullsoftmax(logits, letters, tokenizer, self.temperature)
+        gini = float(1.0 - float((p_letters * p_letters).sum()))
+        letters_with_bucket = sum(1 for b in buckets if len(b) > 0)
+
         if p_letters.sum() <= 0:
             gen = model.generate(**enc, do_sample=False, temperature=0.0, max_new_tokens=1,
                                  pad_token_id=tokenizer.pad_token_id or tokenizer.eos_token_id,
@@ -60,6 +64,33 @@ class FCMMetric:
 
         out = {
             "pred_letter": pred_letter.upper(),
+
+            # New rich diagnostics
+            "fcm_mass_on_letters": float(mass_on_letters),
+            "fcm_letter_probs": p.tolist(),
+            "fcm_letter_p_top1": top1,
+            "fcm_letter_p_top2": top2,
+            "fcm_letter_margin": float(top1 - top2),
+            "fcm_letter_entropy": entropy,
+            "fcm_vote_top_share": top_share,
+            "fcm_vote_entropy": vote_entropy,
+            "fcm_letter_logit_top1": float(mx1),
+            "fcm_letter_logit_top2": float(mx2),
+            "fcm_letter_logit_margin": float(mx1 - mx2),
+            "fcm_letter_lse_top1": float(ls1),
+            "fcm_letter_lse_top2": float(ls2),
+            "fcm_letter_lse_margin": float(ls1 - ls2),
+
+            # ---- Legacy aliases expected by your tables ----
+            "fcm_top_letter": pred_letter.upper(),
+            "fcm_mass_gap": float(top1 - top2),
+            "fcm_letters_coverage": float(letters_with_bucket),  # was 4.0/5.0 in your samples
+            "fcm_entropy": float(entropy),  # entropy over p_letters
+            "fcm_gini": float(gini),
+        }
+        return out
+'''        out = {
+            "pred_letter": pred_letter.upper(),
             "fcm_mass_on_letters": float(mass_on_letters),
             "fcm_letter_probs": p.tolist(),
             "fcm_letter_p_top1": top1,
@@ -75,4 +106,4 @@ class FCMMetric:
             "fcm_letter_lse_top2": float(ls2),
             "fcm_letter_lse_margin": float(ls1 - ls2),
         }
-        return out
+        return out'''

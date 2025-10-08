@@ -155,4 +155,9 @@ def build_features_df(
 
     opt = build_option_table(recs)
     out = collapse_option_side_features(opt)
+
+    print(out.head())
+    print(out.info())
+    print(out.describe())
+
     return out

@@ -10,6 +10,7 @@ from halu.core.determinism import set_seed_and_register
 from halu.features.build import build_features_df
 from halu.engine import DetectorEnsemble, DetectorConfig
 from halu.analysis.report import ReportInputs, generate_report
+from halu.features.audit import audit_features
 
 # ---------------- Config ----------------
 @dataclass
@@ -108,6 +109,7 @@ def run_all(cfg: RunConfig) -> Dict[str, Any]:
 
     # 2) Build features once (deterministic)
     df_all = build_features_df(model, tok, cfg.dataset, size=cfg.n_examples, seed=cfg.seed)
+    audit_features(df_all)
     df_all.to_csv(out / "features.csv", index=False)
 
     print("All columns of the built DF:\n", df_all.columns)

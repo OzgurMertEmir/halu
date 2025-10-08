@@ -45,10 +45,15 @@ class MetricsPipeline:
         want_logits = ("logits" in need) or ("logits_full" in need)
 
         texts = [prompt + r for r in responses]
-        enc = tok(texts, return_tensors="pt", padding=True).to(model.device)
+        enc = tok(texts, return_tensors="pt", padding=True, add_special_tokens=True).to(model.device)
+        prompt_len = int(tok(prompt, return_tensors="pt", add_special_tokens=True).input_ids.shape[1])
 
-        # Shared prompt length (no padding needed)
-        prompt_len = int(tok(prompt, return_tensors="pt").input_ids.shape[1])
+        prompt_ids = tok(prompt, return_tensors="pt", add_special_tokens=True).input_ids[0]
+        for i in range(len(responses)):
+            ids = enc.input_ids[i]
+            # handle padding on the right; compare only the first prompt_len tokens
+            assert torch.equal(ids[:prompt_len],
+                               prompt_ids), "Prompt token mismatch — check chat template or prompt builder."
 
         with torch.inference_mode():
             out = model(**enc,
